@@ -1,0 +1,33 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+app/.cxx/
+.cxx/
+.externalNativeBuild/
+.kotlin/
+
+# Local machine configuration (SDK/NDK paths)
+local.properties
+
+# IDE files
+.idea/
+*.iml
+captures/
+
+# Packaging outputs
+*.apk
+*.aab
+*.aar
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Downloaded Whisper models and other large binaries
+*.bin
+*.gguf
+smoke/base.bin
+smoke/*.bin
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

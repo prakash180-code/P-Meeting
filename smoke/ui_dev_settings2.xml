@@ -1,0 +1,8 @@
+﻿adb.exe : adb.exe: device 'ZD222BXJW2' not found
+At line:1 char:286
++ ... t -First 1; & $adb -s ZD222BXJW2 shell "cat /sdcard/ui.xml" 2>&1 | Ou ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (adb.exe: device 'ZD222BXJW2' not found:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+

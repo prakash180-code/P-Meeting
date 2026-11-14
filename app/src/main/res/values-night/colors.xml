@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the Compose dark surface so the cold-start window does not
+         flash a light background before the first frame is drawn. -->
+    <color name="window_background">#FF101018</color>
+</resources>
