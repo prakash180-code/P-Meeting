@@ -74,8 +74,26 @@ class MediaPlayback(private val context: Context) {
         val current = player
         if (current != null && loadedRecording == recording) {
             if (_state.value.error != null) return
-            if (current.isPlaying) current.pause() else current.start()
-            _state.update { it.copy(isPlaying = current.isPlaying) }
+            // While prepareAsync() is in flight the player is in an invalid
+            // state: start()/pause() throw IllegalStateException and
+            // currentPosition throws too. Ignore the toggle until prepared;
+            // onPrepared starts playback automatically, so no tap is lost.
+            if (!_state.value.isPrepared) return
+            val playing = runCatching {
+                if (current.isPlaying) {
+                    current.pause()
+                    false
+                } else {
+                    current.start()
+                    true
+                }
+            }.getOrElse { t ->
+                _state.value = _state.value.copy(
+                    error = "Playback failed: ${t.message ?: "invalid player state"}"
+                )
+                return
+            }
+            _state.update { it.copy(isPlaying = playing) }
             return
         }
         release()
@@ -101,13 +119,14 @@ class MediaPlayback(private val context: Context) {
                 } else {
                     0f
                 }
-                prepared.start()
+                runCatching { prepared.start() }
                 _state.update {
                     it.copy(
                         isPrepared = true,
                         isPlaying = true,
                         durationMs = duration,
-                        videoAspectRatio = aspectRatio
+                        videoAspectRatio = aspectRatio,
+                        error = null
                     )
                 }
             }
@@ -134,18 +153,22 @@ class MediaPlayback(private val context: Context) {
     }
 
     fun seekTo(positionMs: Long) {
-        runCatching { player?.seekTo(positionMs.toInt()) }
+        val current = player ?: return
+        // seekTo is only valid once prepared; guard the invalid state.
+        if (!_state.value.isPrepared) return
+        runCatching { current.seekTo(positionMs.toInt()) }
         _state.update { it.copy(positionMs = positionMs) }
     }
 
     /** Poll current position; called periodically from the UI layer. */
     fun refreshPosition() {
         val current = player ?: return
+        if (!_state.value.isPrepared) return
         runCatching {
             _state.update {
                 it.copy(
                     positionMs = current.currentPosition.toLong().coerceAtLeast(0L),
-                    isPlaying = if (it.isPrepared) current.isPlaying else it.isPlaying
+                    isPlaying = current.isPlaying
                 )
             }
         }

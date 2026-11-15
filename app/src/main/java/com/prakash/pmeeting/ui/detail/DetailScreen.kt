@@ -126,6 +126,7 @@ fun DetailScreen(
     val playerState by viewModel.playerState.collectAsStateWithLifecycle()
     val transcription by viewModel.transcription.collectAsStateWithLifecycle()
     val transcribing by viewModel.isTranscribing.collectAsStateWithLifecycle()
+    val isGeneratingMinutes by viewModel.isGeneratingMinutes.collectAsStateWithLifecycle()
     val minutes by viewModel.minutes.collectAsStateWithLifecycle()
     val actionItems by viewModel.actionItems.collectAsStateWithLifecycle()
     val transcriptionLanguage by viewModel.transcriptionLanguage.collectAsStateWithLifecycle()
@@ -180,6 +181,12 @@ fun DetailScreen(
         viewModel.events.collect { event ->
             when (event) {
                 is DetailEvent.Deleted -> onBack()
+                DetailEvent.DeleteFileCleanupFailed -> {
+                    snackbarHostState.showSnackbar(
+                        "Entry removed, but its file could not be deleted."
+                    )
+                    onBack()
+                }
                 is DetailEvent.TranscriptionFailed ->
                     snackbarHostState.showSnackbar("Transcription failed: ${event.message}")
                 is DetailEvent.MinutesFailed ->
@@ -261,7 +268,9 @@ fun DetailScreen(
                     }
                     IconButton(
                         onClick = { viewModel.generateMinutes() },
-                        enabled = recording != null && minutes?.status != MinutesStatus.PENDING
+                        enabled = recording != null &&
+                            minutes?.status != MinutesStatus.PENDING &&
+                            !isGeneratingMinutes
                     ) {
                         Icon(
                             Icons.Filled.TextFields,
@@ -798,7 +807,10 @@ private fun FullScreenVideo(
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = { onSeekBy(-10_000L) }) {
+                    IconButton(
+                        onClick = { onSeekBy(-10_000L) },
+                        enabled = playerState.isPrepared
+                    ) {
                         Icon(
                             Icons.Filled.Replay10,
                             contentDescription = "Back 10 seconds",
@@ -806,7 +818,11 @@ private fun FullScreenVideo(
                             modifier = Modifier.size(36.dp)
                         )
                     }
-                    FilledIconButton(onClick = onToggle, modifier = Modifier.size(64.dp)) {
+                    FilledIconButton(
+                        onClick = onToggle,
+                        enabled = playerState.error == null,
+                        modifier = Modifier.size(64.dp)
+                    ) {
                         Icon(
                             imageVector = if (playerState.isPlaying) {
                                 Icons.Filled.Pause
@@ -817,7 +833,10 @@ private fun FullScreenVideo(
                             modifier = Modifier.size(36.dp)
                         )
                     }
-                    IconButton(onClick = { onSeekBy(10_000L) }) {
+                    IconButton(
+                        onClick = { onSeekBy(10_000L) },
+                        enabled = playerState.isPrepared
+                    ) {
                         Icon(
                             Icons.Filled.Forward10,
                             contentDescription = "Forward 10 seconds",

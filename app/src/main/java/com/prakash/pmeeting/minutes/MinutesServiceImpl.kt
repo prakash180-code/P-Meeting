@@ -7,10 +7,19 @@ import com.prakash.pmeeting.data.model.MinutesStatus
 import com.prakash.pmeeting.data.model.TranscriptionStatus
 import com.prakash.pmeeting.data.repository.RecordingRepository
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MinutesServiceImpl(
     private val repository: RecordingRepository
 ) : MinutesService {
+
+    /**
+     * Serializes generation across all callers (the detail and minutes screens
+     * can both trigger it). Without this, two concurrent runs could both read
+     * an empty action-item set and insert duplicate items.
+     */
+    private val generateMutex = Mutex()
 
     private val actionKeywords = listOf(
         "will", "should", "need to", "action item", "follow up", "todo", "task",
@@ -23,16 +32,16 @@ class MinutesServiceImpl(
         "we will", "let's", "let us", "the decision", "outcome", "agreement"
     )
 
-    override suspend fun generateMinutes(recordingId: Long): Long {
+    override suspend fun generateMinutes(recordingId: Long): Long = generateMutex.withLock {
         val transcription = repository.getTranscription(recordingId)
-            ?: return repository.upsertMinutes(
+            ?: return@withLock repository.upsertMinutes(
                 recordingId = recordingId,
                 status = MinutesStatus.FAILED,
                 errorMessage = "No transcription available for this recording."
             )
 
         if (transcription.status != TranscriptionStatus.COMPLETED || transcription.text.isNullOrBlank()) {
-            return repository.upsertMinutes(
+            return@withLock repository.upsertMinutes(
                 recordingId = recordingId,
                 status = MinutesStatus.FAILED,
                 errorMessage = "Transcription is not complete."
@@ -61,7 +70,7 @@ class MinutesServiceImpl(
             }
         }
 
-        return minutesId
+        return@withLock minutesId
     }
 
     override fun observeMinutes(recordingId: Long): Flow<Minutes?> =

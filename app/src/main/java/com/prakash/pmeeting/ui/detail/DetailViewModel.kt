@@ -83,6 +83,10 @@ class DetailViewModel(
     private val _events = MutableSharedFlow<DetailEvent>(extraBufferCapacity = 8)
     val events = _events.asSharedFlow()
 
+    /** True while a minutes generation request is running. */
+    private val _isGeneratingMinutes = MutableStateFlow(false)
+    val isGeneratingMinutes: StateFlow<Boolean> = _isGeneratingMinutes.asStateFlow()
+
     private var pollJob: Job? = null
 
     fun playPause() {
@@ -123,8 +127,11 @@ class DetailViewModel(
             playback.release()
             stopPolling()
             TranscriptionWorker.cancel(getApplication(), recordingId)
-            repository.delete(recording)
-            _events.tryEmit(DetailEvent.Deleted)
+            val fileDeleted = repository.delete(recording)
+            _events.tryEmit(
+                if (fileDeleted) DetailEvent.Deleted
+                else DetailEvent.DeleteFileCleanupFailed
+            )
         }
     }
 
@@ -184,11 +191,15 @@ class DetailViewModel(
     fun generateMinutes() {
         val m = minutes.value
         if (m?.status == MinutesStatus.PENDING) return
+        if (_isGeneratingMinutes.value) return
+        _isGeneratingMinutes.value = true
         viewModelScope.launch {
             try {
                 minutesService.generateMinutes(recordingId)
             } catch (e: Exception) {
                 _events.tryEmit(DetailEvent.MinutesFailed(e.message ?: "unknown error"))
+            } finally {
+                _isGeneratingMinutes.value = false
             }
         }
     }
@@ -248,6 +259,8 @@ class DetailViewModel(
 
 sealed interface DetailEvent {
     data object Deleted : DetailEvent
+    /** The DB row was removed but the media file could not be deleted. */
+    data object DeleteFileCleanupFailed : DetailEvent
     data class TranscriptionFailed(val message: String) : DetailEvent
     data class MinutesFailed(val message: String) : DetailEvent
     data class ActionItemFailed(val message: String) : DetailEvent

@@ -1,5 +1,6 @@
 package com.prakash.pmeeting.ui.audio
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -89,6 +90,19 @@ fun AudioRecordScreen(
     // take: it is stopped and saved with a default title. Previously the
     // microphone kept recording in the background, which contradicted the
     // documented behaviour and could never be stopped from the UI.
+    //
+    // Back is routed through the same stop-and-save flow instead of calling
+    // onDone() immediately: navigation can clear this screen-scoped ViewModel
+    // before an in-flight save completes, which lost the take.
+    val requestExit: () -> Unit = {
+        if (!uiState.saving) viewModel.stopAndSaveAndExit()
+    }
+
+    // System back must not bypass the stop-and-save flow either. While a draft
+    // dialog is open the dialog owns back (discard); while saving, back is
+    // swallowed until the save finishes.
+    BackHandler(enabled = !uiState.saving && uiState.draft == null) { requestExit() }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -110,7 +124,11 @@ fun AudioRecordScreen(
 
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
-            if (event is AudioRecordEvent.RecordingSaved) onDone()
+            when (event) {
+                AudioRecordEvent.RecordingSaved -> onDone()
+                AudioRecordEvent.SaveFailed -> Unit
+                AudioRecordEvent.DraftDiscarded -> Unit
+            }
         }
     }
 
@@ -119,7 +137,10 @@ fun AudioRecordScreen(
             TopAppBar(
                 title = { Text("Record audio") },
                 navigationIcon = {
-                    TextButton(onClick = onDone) {
+                    TextButton(
+                        onClick = requestExit,
+                        enabled = !uiState.saving
+                    ) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back"
@@ -204,6 +225,14 @@ fun AudioRecordScreen(
                 Text(
                     text = error,
                     color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+            }
+
+            if (uiState.saving) {
+                Text(
+                    text = "Saving recording…",
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 16.dp)
                 )

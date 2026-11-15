@@ -18,7 +18,13 @@ class PMeetingApplication : Application() {
     lateinit var container: AppContainer
         private set
 
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * Process-wide scope for work that must survive a screen or ViewModel being
+     * torn down (for example finalizing and saving a recording while the user
+     * navigates back). Cancellation never reaches this scope, so a pending save
+     * is not lost when the recorder screen leaves composition.
+     */
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()

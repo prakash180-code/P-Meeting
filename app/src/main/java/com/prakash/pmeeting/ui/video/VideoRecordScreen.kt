@@ -54,6 +54,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.prakash.pmeeting.data.model.MediaType
 import com.prakash.pmeeting.permissions.Permissions
 import com.prakash.pmeeting.recording.RecorderStatus
+import com.prakash.pmeeting.recording.VideoEvent
 import com.prakash.pmeeting.recording.VideoRecorder
 import com.prakash.pmeeting.ui.components.ConsentDialog
 import com.prakash.pmeeting.ui.components.TitleEditorDialog
@@ -109,22 +110,47 @@ fun VideoRecordScreen(
     // default title, then pop once the save completes. Without this, closing
     // the screen while recording orphaned the .mp4 and lost the recording.
     var finishing by remember { mutableStateOf(false) }
+    // The recorder delivers finalize directly; the event flow has no replay, so
+    // without this listener a teardown-time finalize would be silently lost.
+    // It is intentionally not cleared on dispose: if the activity is destroyed
+    // while a take is still finalizing, the callback must still reach the
+    // ViewModel so the application-scoped save can persist it.
+    DisposableEffect(recorder, viewModel) {
+        recorder.setFinalizeListener { result -> viewModel.onFinalized(result) }
+        onDispose { }
+    }
+
+    // Finalize is delivered through the direct listener above; forwarding it
+    // from the event flow too would process the same take twice. This collector
+    // only handles start/pause/resume.
+    LaunchedEffect(recorder, viewModel) {
+        recorder.eventFlow.collect { event ->
+            if (event !is VideoEvent.RecordingFinalized) viewModel.onVideoEvent(event)
+        }
+    }
     val requestExit: () -> Unit = {
-        if (uiState.status == RecorderStatus.IDLE) {
-            onDone()
-        } else if (!finishing) {
-            finishing = true
-            viewModel.markAutoSavePending()
-            recorder.stopRecording()
+        when {
+            uiState.saving -> Unit // a save is already in flight; onDone follows it
+            uiState.draft != null -> Unit // the save/discard dialog owns exit
+            uiState.status == RecorderStatus.IDLE -> onDone()
+            finishing -> Unit
+            else -> {
+                finishing = true
+                viewModel.markAutoSavePending()
+                recorder.stopRecording()
+            }
         }
     }
 
-    BackHandler(enabled = uiState.status != RecorderStatus.IDLE) { requestExit() }
+    // Back is ignored while recording (the take must be saved first); when the
+    // save/discard dialog is open the dialog owns back (dismiss = discard).
+    BackHandler(enabled = uiState.status != RecorderStatus.IDLE && uiState.draft == null) {
+        requestExit()
+    }
 
-    // Re-arm the exit guard once the recorder is idle again (for example if the
-    // automatic save failed but the user wants to leave).
-    LaunchedEffect(uiState.status) {
-        if (uiState.status == RecorderStatus.IDLE) finishing = false
+    // Re-arm the exit guard once the recorder is idle and no save is running.
+    LaunchedEffect(uiState.status, uiState.saving) {
+        if (uiState.status == RecorderStatus.IDLE && !uiState.saving) finishing = false
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -148,19 +174,20 @@ fun VideoRecordScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            viewModel.clearAutoSavePending()
+            // If the activity is destroyed while a take is still finalizing,
+            // keep the auto-save intent so the finalize (delivered through the
+            // direct listener) persists it with a default title.
+            viewModel.markAutoSavePending()
             recorder.close()
         }
     }
 
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
+            // Only a successful persist ends the screen. On failure the draft
+            // stays put (with the error shown) so the take can be retried.
             if (event is VideoRecordEvent.RecordingSaved) onDone()
         }
-    }
-
-    LaunchedEffect(Unit) {
-        recorder.eventFlow.collect { event -> viewModel.onVideoEvent(event) }
     }
 
     LaunchedEffect(recorder, rebindKey, cameraGranted) {

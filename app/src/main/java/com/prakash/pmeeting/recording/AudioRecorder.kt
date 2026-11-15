@@ -23,9 +23,10 @@ class AudioRecorder(private val context: Context) {
 
     fun start(directory: File): kotlin.Result<File> {
         val recorder = newRecorder()
+        var file: File? = null
         return try {
             directory.mkdirs()
-            val file = File(directory, "PM_AUDIO_${Formats.fileNameTimestamp()}.m4a")
+            file = File(directory, "PM_AUDIO_${Formats.fileNameTimestamp()}.m4a")
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -40,6 +41,9 @@ class AudioRecorder(private val context: Context) {
             Result.success(file)
         } catch (t: Throwable) {
             runCatching { recorder.release() }
+            // prepare()/start() may have created a partial/empty file; remove it
+            // so a failed start never leaves an orphaned media file behind.
+            file?.let { f -> runCatching { if (f.exists()) f.delete() } }
             Result.failure(t)
         }
     }

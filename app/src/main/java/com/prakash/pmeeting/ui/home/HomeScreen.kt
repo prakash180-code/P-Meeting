@@ -63,7 +63,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -78,6 +77,7 @@ import com.prakash.pmeeting.ui.components.EmptyState
 import com.prakash.pmeeting.ui.components.SearchField
 import com.prakash.pmeeting.ui.components.TitleEditorDialog
 import com.prakash.pmeeting.ui.components.recordingSubtitle
+import com.prakash.pmeeting.ui.theme.SuccessGreen
 import com.prakash.pmeeting.ui.components.RecordingTypeIcon
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -556,7 +556,7 @@ private fun TranscriptionStatusBadge(
             TranscriptionStatus.COMPLETED -> Icon(
                 Icons.Filled.CheckCircle,
                 contentDescription = null,
-                tint = Color(0xFF4CAF50),
+                tint = SuccessGreen,
                 modifier = Modifier.size(20.dp)
             )
             TranscriptionStatus.FAILED -> Icon(

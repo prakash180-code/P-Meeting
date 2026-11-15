@@ -8,7 +8,9 @@ import com.prakash.pmeeting.data.model.MediaType
 import com.prakash.pmeeting.data.model.Recording
 import com.prakash.pmeeting.data.model.RecordingSource
 import com.prakash.pmeeting.data.model.StorageKind
+import com.prakash.pmeeting.recording.FinalizedVideo
 import com.prakash.pmeeting.recording.RecorderStatus
+import com.prakash.pmeeting.recording.RecordingFinalizer
 import com.prakash.pmeeting.recording.VideoEvent
 import com.prakash.pmeeting.transcription.AutoTranscription
 import com.prakash.pmeeting.util.Formats
@@ -20,8 +22,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -35,7 +35,9 @@ data class VideoRecordUiState(
     val micGranted: Boolean = false,
     val error: String? = null,
     /** Set after a finalize; the UI then shows the save dialog (or autosaves). */
-    val draft: Draft? = null
+    val draft: Draft? = null,
+    /** True while a draft is being persisted; blocks another stop/save. */
+    val saving: Boolean = false
 ) {
     data class Draft(
         val fileUri: String,
@@ -47,11 +49,14 @@ data class VideoRecordUiState(
 sealed interface VideoRecordEvent {
     data object RecordingSaved : VideoRecordEvent
     data object DraftDiscarded : VideoRecordEvent
+    data object SaveFailed : VideoRecordEvent
 }
 
 class VideoRecordViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = (application as PMeetingApplication).container.recordingRepository
+    private val app = application
+    private val appScope = (application as PMeetingApplication).applicationScope
 
     private val _uiState = MutableStateFlow(VideoRecordUiState())
     val uiState: StateFlow<VideoRecordUiState> = _uiState.asStateFlow()
@@ -87,7 +92,11 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
         _uiState.update { it.copy(error = message) }
     }
 
-    /** Bridges CameraX recorder events into the UI state. */
+    /**
+     * Bridges CameraX recorder events into the UI state. The finalize path is
+     * idempotent: the recorder guarantees exactly one finalize, but a duplicate
+     * from a late callback must not overwrite a draft already awaiting save.
+     */
     fun onVideoEvent(event: VideoEvent) {
         when (event) {
             is VideoEvent.RecordingStarted -> {
@@ -109,9 +118,18 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    /** Called by the recorder even when the event flow has no collector. */
+    fun onFinalized(result: FinalizedVideo) {
+        stopTicker()
+        handleFinalized(result)
+    }
+
     fun discardDraft() {
         val draft = _uiState.value.draft ?: return
-        viewModelScope.launch {
+        if (_uiState.value.saving) return
+        // Use the application scope so the delete completes even if the screen
+        // is torn down right after the user cancels.
+        appScope.launch {
             if (draft.fileUri.startsWith("content://")) {
                 _uiState.update { it.copy(draft = null) }
             } else {
@@ -124,42 +142,49 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
 
     fun saveDraft(title: String) {
         val draft = _uiState.value.draft ?: return
-        viewModelScope.launch {
-            runCatching {
-                repository.save(
-                    Recording(
-                        id = 0L,
-                        title = title,
-                        createdAt = System.currentTimeMillis(),
-                        durationMs = draft.durationMs,
-                        mediaType = MediaType.VIDEO,
-                        source = RecordingSource.RECORDED,
-                        storageKind = StorageKind.INTERNAL_FILE,
-                        fileUri = draft.fileUri,
-                        mimeType = "video/mp4",
-                        sizeBytes = 0L
-                    )
-                )
-            }.onSuccess { id ->
-                repository.updateSize(id)
-                _uiState.update { it.copy(draft = null) }
-                // The video is finalized and saved; queue background transcription.
-                AutoTranscription.enqueue(getApplication<Application>(), repository, id)
-                _events.tryEmit(VideoRecordEvent.RecordingSaved)
-            }.onFailure { t ->
+        if (_uiState.value.saving) return
+        _uiState.update { it.copy(saving = true, error = null) }
+        // Application scope: navigation can clear the ViewModel before the
+        // Room insert finishes, which previously lost the take.
+        appScope.launch {
+            val id = runCatching { repository.save(draft.toRecording(title, MediaType.VIDEO, "video/mp4")) }
+                .getOrNull()
+            if (id == null) {
                 _uiState.update {
-                    it.copy(error = "Could not save recording: ${t.message ?: "unknown error"}")
+                    it.copy(
+                        saving = false,
+                        error = "Could not save recording. The file was kept; try again."
+                    )
                 }
+                _events.tryEmit(VideoRecordEvent.SaveFailed)
+                return@launch
             }
+            repository.updateSize(id)
+            _uiState.update { it.copy(draft = null, saving = false) }
+            // The video is finalized and saved; queue background transcription.
+            AutoTranscription.enqueue(app, repository, id)
+            _events.tryEmit(VideoRecordEvent.RecordingSaved)
         }
     }
 
     /**
-     * Called when the app is backgrounded or the screen leaves composition:
-     * the finalize that follows is saved with a default title automatically.
+     * Called when the app is backgrounded or the screen leaves composition.
+     * If a take already finalized into a draft, it is persisted immediately
+     * with its suggested title (guarded so repeated callbacks cannot create a
+     * duplicate). If a recording is still active, the next finalize is saved
+     * automatically.
      */
     fun markAutoSavePending() {
-        if (_uiState.value.draft == null && _uiState.value.status != RecorderStatus.IDLE) {
+        val state = _uiState.value
+        if (state.saving) return
+        val draft = state.draft
+        if (draft != null) {
+            // Finalized but not yet saved: persist now so a background/dispose
+            // cannot orphan the file. saveDraft is idempotent while saving.
+            saveDraft(draft.suggestedTitle)
+            return
+        }
+        if (state.status != RecorderStatus.IDLE) {
             autoSaveOnFinalize = true
         }
     }
@@ -168,45 +193,82 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
         autoSaveOnFinalize = false
     }
 
-    private fun handleFinalized(result: com.prakash.pmeeting.recording.FinalizedVideo) {
+    private fun handleFinalized(result: FinalizedVideo) {
         val autoSave = autoSaveOnFinalize
         autoSaveOnFinalize = false
         val file = result.file
-        if (result.errorMessage != null) {
+        val fileIsUsable = file != null && RecordingFinalizer.isUsableTake(
+            fileExists = file.exists(),
+            lengthBytes = file.length(),
+            errorMessage = null
+        )
+        // A CameraX error can still leave a non-empty file. Keep it as a
+        // retryable draft instead of dropping a take the user can save.
+        val recoveredFromError = result.errorMessage != null && fileIsUsable
+        if (result.errorMessage != null && !recoveredFromError) {
             _uiState.update {
                 it.copy(
                     status = RecorderStatus.IDLE,
+                    saving = false,
                     error = result.errorMessage
                 )
             }
             return
         }
-        if (file == null) {
+        if (!fileIsUsable) {
             _uiState.update {
                 it.copy(
                     status = RecorderStatus.IDLE,
-                    error = "Recording failed: the video file was not produced."
+                    saving = false,
+                    error = result.errorMessage
+                        ?: "Recording failed: the video file was not produced."
                 )
             }
             return
+        }
+        // A second finalize while a draft is pending: the recorder must never
+        // produce one, but guard against an orphan file if it ever does.
+        val previous = _uiState.value.draft
+        if (previous != null) {
+            appScope.launch { repository.deleteInternalFile(previous.fileUri) }
         }
         val draft = VideoRecordUiState.Draft(
             fileUri = file.absolutePath,
             durationMs = result.durationMs,
             suggestedTitle = "Meeting ${Formats.formatDate(System.currentTimeMillis())}"
         )
-        if (_uiState.value.draft != null) {
-            // A second finalize while a draft is pending: keep the newest file,
-            // discard the older draft to avoid orphan files.
-            val old = _uiState.value.draft
-            viewModelScope.launch { repository.deleteInternalFile(old!!.fileUri) }
+        _uiState.update {
+            it.copy(
+                status = RecorderStatus.IDLE,
+                draft = draft,
+                saving = false,
+                error = if (recoveredFromError) {
+                    "Recording reported an error but produced a usable file. " +
+                        "Review it before saving."
+                } else {
+                    null
+                }
+            )
         }
-        _uiState.update { it.copy(status = RecorderStatus.IDLE, draft = draft) }
-        if (autoSave) {
+        if (autoSave && !recoveredFromError) {
             // App was left while recording; keep the take with a default title.
             saveDraft(draft.suggestedTitle)
         }
     }
+
+    private fun VideoRecordUiState.Draft.toRecording(title: String, mediaType: MediaType, mimeType: String) =
+        Recording(
+            id = 0L,
+            title = title,
+            createdAt = System.currentTimeMillis(),
+            durationMs = durationMs,
+            mediaType = mediaType,
+            source = RecordingSource.RECORDED,
+            storageKind = StorageKind.INTERNAL_FILE,
+            fileUri = fileUri,
+            mimeType = mimeType,
+            sizeBytes = 0L
+        )
 
     private fun startTicker() {
         tickerJob = viewModelScope.launch {

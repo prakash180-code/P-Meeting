@@ -58,9 +58,9 @@ or telemetry code anywhere in the project.
   minutes and action items and hands it to any installed email app via the
   system share sheet.
 - **Model management** — *Settings* downloads, validates, retries and deletes
-  a whisper.cpp model (default multilingual `base`, alternative English
-  `tiny.en`). Models are stored in app-private storage and are not bundled in
-  the APK.
+  the default multilingual `base` whisper.cpp model. Models are stored in
+  app-private storage and are not bundled in the APK. Model selection is not
+  exposed in Settings; the app uses the single default model.
 
 ### Playback and automatic transcription (Phase 4)
 

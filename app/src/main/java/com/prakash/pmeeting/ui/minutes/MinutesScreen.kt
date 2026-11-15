@@ -65,7 +65,8 @@ fun MinutesScreen(
         }
     )
     val context = LocalContext.current
-    val minutes by viewModel.minutes.collectAsStateWithLifecycle()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val minutes = uiState.minutes
 
     val showEdit = rememberSaveable { mutableStateOf(false) }
     val editText = rememberSaveable { mutableStateOf("") }
@@ -154,18 +155,23 @@ fun MinutesScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                when (current.status) {
-                    MinutesStatus.PENDING -> Text(
+                when {
+                    uiState.isGenerating -> Text(
+                        text = "Generating…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    current.status == MinutesStatus.PENDING -> Text(
                         text = "Pending",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    MinutesStatus.COMPLETED -> Text(
+                    current.status == MinutesStatus.COMPLETED -> Text(
                         text = "Completed",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    MinutesStatus.FAILED -> Text(
+                    current.status == MinutesStatus.FAILED -> Text(
                         text = "Failed",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error

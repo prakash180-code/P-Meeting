@@ -10,6 +10,7 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+#include <cstdint>
 
 #include "whisper.h"
 
@@ -26,9 +27,13 @@ static jmethodID g_segmentCtor = nullptr;
 
 static void pcm16_to_float(const jbyte *pcm, int n_samples, float *out) {
     for (int i = 0; i < n_samples; ++i) {
-        int16_t sample = 0;
-        // little-endian 16-bit PCM
-        sample = static_cast<int16_t>((pcm[2 * i + 1] << 8) | (pcm[2 * i] & 0xFF));
+        // Little-endian 16-bit PCM. jbyte is signed, so shifting a negative
+        // byte left is undefined behaviour; reinterpret each byte as unsigned
+        // before assembling the sample.
+        const uint8_t lo = static_cast<uint8_t>(pcm[2 * i]);
+        const uint8_t hi = static_cast<uint8_t>(pcm[2 * i + 1]);
+        const int16_t sample = static_cast<int16_t>(
+            (static_cast<uint16_t>(hi) << 8) | static_cast<uint16_t>(lo));
         out[i] = static_cast<float>(sample) / 32768.0f;
     }
 }

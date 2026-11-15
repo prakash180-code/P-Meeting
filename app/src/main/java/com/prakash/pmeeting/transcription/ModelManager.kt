@@ -150,11 +150,21 @@ class ModelManager(private val context: Context, private val whisperEngine: Whis
         downloadJob = CoroutineScope(Dispatchers.IO + Job()).launch {
             try {
                 downloadWithProgress(config)
+            } catch (e: CancellationException) {
+                // Cancellation is a user action, not a failure: keep the
+                // cancelled/interrupted state instead of overwriting it with
+                // FAILED, then propagate cancellation.
+                _modelState.value = _modelState.value.copy(
+                    config = config,
+                    status = ModelStatus.INTERRUPTED,
+                    errorMessage = "Download cancelled."
+                )
+                throw e
             } catch (e: Exception) {
                 _modelState.value = _modelState.value.copy(
                     config = config,
                     status = ModelStatus.FAILED,
-                    errorMessage = "Download interrupted: ${e.message ?: "unknown error"}"
+                    errorMessage = "Download failed: ${e.message ?: "unknown error"}"
                 )
             }
         }
@@ -318,9 +328,16 @@ class ModelManager(private val context: Context, private val whisperEngine: Whis
     }
 
     suspend fun deleteModel() {
-        cancelDownload()
-        val file = modelFileFor(_modelState.value.config)
-        file.delete()
+        // Wait for any in-flight download to finish cleaning up its temp file
+        // before removing the model, so a late rename cannot resurrect a file
+        // the user just deleted.
+        downloadJob?.cancel()
+        runCatching { downloadJob?.join() }
+        downloadJob = null
+        val config = _modelState.value.config
+        modelFileFor(config).delete()
+        // Remove a leftover partial download too.
+        File(modelDir, "${config.id}.bin.part").delete()
         _modelState.value = _modelState.value.copy(
             status = ModelStatus.IDLE,
             progress = 0f,

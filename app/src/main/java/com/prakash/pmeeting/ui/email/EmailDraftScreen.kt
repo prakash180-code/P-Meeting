@@ -75,18 +75,21 @@ fun EmailDraftScreen(
     val userEditedBody = remember { mutableStateOf(false) }
     val initialized = remember { mutableStateOf(false) }
 
-    // Populate the draft only after the transcript (and related data) have
-    // loaded, so we never ship a stale body captured while the flows were
-    // still empty.
-    LaunchedEffect(transcription, minutes, actionItems, recording) {
-        if (transcription != null && !initialized.value) {
+    // Populate the draft only once the recording and transcript are loaded, so
+    // we never ship a stale body captured while the flows were still empty.
+    // Minutes/action items available at that moment are folded in via the
+    // initial checkbox values below.
+    LaunchedEffect(recording, transcription) {
+        val rec = recording
+        val tx = transcription
+        if (rec != null && tx != null && !initialized.value) {
             includeMinutes.value = minutes != null
             includeActionItems.value = actionItems.isNotEmpty()
-            subject.value = "Meeting Transcript - $recordingTitle"
+            subject.value = "Meeting Transcript - ${rec.title}"
             body.value = buildEmailBody(
-                title = recordingTitle,
-                date = recordingDate,
-                transcription = transcription,
+                title = rec.title,
+                date = rec.createdAt.let { Formats.formatDate(it) },
+                transcription = tx,
                 minutes = minutes,
                 actionItems = actionItems,
                 includeMinutes = includeMinutes.value,
@@ -98,8 +101,10 @@ fun EmailDraftScreen(
 
     // Rebuild the body when the inclusion toggles change, unless the user has
     // manually edited the body (in which case their edits take precedence).
-    LaunchedEffect(includeMinutes, includeActionItems) {
-        if (initialized.value && !userEditedBody.value && transcription != null) {
+    // Keyed on the boolean *values* (not the MutableState objects, whose
+    // identity never changes) so toggling a checkbox actually re-runs this.
+    LaunchedEffect(initialized.value, includeMinutes.value, includeActionItems.value) {
+        if (initialized.value && !userEditedBody.value && transcription != null && recording != null) {
             body.value = buildEmailBody(
                 title = recordingTitle,
                 date = recordingDate,

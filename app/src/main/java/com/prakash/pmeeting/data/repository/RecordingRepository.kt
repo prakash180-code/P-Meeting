@@ -122,14 +122,18 @@ class RecordingRepository(
         dao.update(existing.copy(title = newTitle))
     }
 
-    /** Deletes a single recording: its media file (if internal) and all database records. */
+    /**
+     * Deletes a single recording. The database rows are removed first (in a
+     * transaction) and only then the internal media file, so a failed database
+     * deletion never leaves a library row pointing at a deleted file. Returns
+     * true if every file that needed deletion was deleted successfully.
+     */
     suspend fun delete(recording: Recording): Boolean = withContext(Dispatchers.IO) {
-        val fileDeleted = deleteFileFor(recording)
         database.withTransaction {
             transcriptionDao.deleteByRecordingId(recording.id)
             dao.deleteById(recording.id)
         }
-        fileDeleted
+        deleteFileFor(recording)
     }
 
     /**
@@ -165,7 +169,8 @@ class RecordingRepository(
         var allFilesDeleted = true
         for (id in ids) {
             val recording = dao.getById(id)?.toModel() ?: continue
-            allFilesDeleted = deleteFileFor(recording) && allFilesDeleted
+            // Remove the database rows first; only delete the media file once
+            // the rows are gone, so no row can point at a deleted file.
             database.withTransaction {
                 // TranscriptionSegmentEntity cascades from transcriptions;
                 // minutes and action items cascade from recordings. Transcription
@@ -173,6 +178,7 @@ class RecordingRepository(
                 transcriptionDao.deleteByRecordingId(id)
                 dao.deleteById(id)
             }
+            allFilesDeleted = deleteFileFor(recording) && allFilesDeleted
         }
         allFilesDeleted
     }
@@ -373,21 +379,30 @@ class RecordingRepository(
         database.withTransaction {
             val now = System.currentTimeMillis()
             val existing = minutesDao.getByRecordingId(recordingId)
-            // A failed minutes regeneration must not erase previously generated minutes.
-            val finalText = if (existing != null && status != MinutesStatus.COMPLETED) existing.text else text
+            // A failed regeneration must not erase previously generated minutes
+            // or hide them from editing/deletion. When completed minutes already
+            // exist, keep them as COMPLETED and surface the failure via
+            // errorMessage so the user can still edit or delete them.
+            val merged = com.prakash.pmeeting.minutes.MinutesMergePolicy.merge(
+                existingStatus = existing?.status,
+                existingText = existing?.text,
+                requestedStatus = status,
+                requestedText = text,
+                requestedError = errorMessage
+            )
             val entity = if (existing != null) {
                 existing.copy(
-                    status = MinutesEntity.statusString(status),
-                    text = finalText,
-                    errorMessage = if (status == MinutesStatus.FAILED) errorMessage else null,
+                    status = MinutesEntity.statusString(merged.status),
+                    text = merged.text,
+                    errorMessage = merged.errorMessage,
                     updatedAt = now
                 )
             } else {
                 MinutesEntity(
                     recordingId = recordingId,
-                    status = MinutesEntity.statusString(status),
-                    text = if (status == MinutesStatus.COMPLETED) text else null,
-                    errorMessage = if (status == MinutesStatus.FAILED) errorMessage else null,
+                    status = MinutesEntity.statusString(merged.status),
+                    text = if (merged.status == MinutesStatus.COMPLETED) merged.text else null,
+                    errorMessage = merged.errorMessage,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -527,21 +542,30 @@ class RecordingRepository(
         originalDurationMs: Long?
     ): Recording = withContext(Dispatchers.IO) {
         if (copyIntoAppStorage) {
-            val copied = copyIntoAppStorage(uri, originalMimeType)
-            val duration = probeDuration(copied)
-            val entity = com.prakash.pmeeting.data.local.RecordingEntity(
-                title = title,
-                createdAt = System.currentTimeMillis(),
-                durationMs = originalDurationMs ?: duration ?: 0L,
-                mediaType = detectMediaType(copied, originalMimeType),
-                source = RecordingSource.IMPORTED,
-                storageKind = StorageKind.INTERNAL_FILE,
-                fileUri = copied.absolutePath,
-                mimeType = originalMimeType ?: guessMimeType(copied.name),
-                sizeBytes = copied.length()
-            )
-            val id = dao.insert(entity)
-            entity.copy(id = id).toModel()
+            // If the copy or a later DB insert fails, the partial/temporary file
+            // must be removed so the app does not keep an orphaned copy. The
+            // original picked file is never touched.
+            var copied: File? = null
+            try {
+                copied = copyIntoAppStorage(uri, originalMimeType)
+                val duration = probeDuration(copied)
+                val entity = com.prakash.pmeeting.data.local.RecordingEntity(
+                    title = title,
+                    createdAt = System.currentTimeMillis(),
+                    durationMs = originalDurationMs ?: duration ?: 0L,
+                    mediaType = detectMediaType(copied, originalMimeType),
+                    source = RecordingSource.IMPORTED,
+                    storageKind = StorageKind.INTERNAL_FILE,
+                    fileUri = copied.absolutePath,
+                    mimeType = originalMimeType ?: guessMimeType(copied.name),
+                    sizeBytes = copied.length()
+                )
+                val id = dao.insert(entity)
+                entity.copy(id = id).toModel()
+            } catch (t: Throwable) {
+                copied?.let { runCatching { it.delete() } }
+                throw t
+            }
         } else {
             val duration = originalDurationMs ?: probeDuration(uri)
             val entity = com.prakash.pmeeting.data.local.RecordingEntity(

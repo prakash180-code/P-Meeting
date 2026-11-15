@@ -14,6 +14,7 @@ import com.prakash.pmeeting.data.model.RecordingSource
 import com.prakash.pmeeting.data.model.StorageKind
 import com.prakash.pmeeting.recording.AudioRecorder
 import com.prakash.pmeeting.recording.RecorderStatus
+import com.prakash.pmeeting.recording.RecordingFinalizer
 import com.prakash.pmeeting.transcription.AutoTranscription
 import com.prakash.pmeeting.util.Formats
 import kotlinx.coroutines.Job
@@ -34,7 +35,9 @@ data class AudioRecordUiState(
     val micPermissionGranted: Boolean = false,
     val error: String? = null,
     /** Set after a successful stop; the UI then shows the save dialog. */
-    val draft: Draft? = null
+    val draft: Draft? = null,
+    /** True while a draft is being persisted; blocks another stop/save. */
+    val saving: Boolean = false
 ) {
     data class Draft(
         val fileUri: String,
@@ -46,6 +49,7 @@ data class AudioRecordUiState(
 sealed interface AudioRecordEvent {
     data object RecordingSaved : AudioRecordEvent
     data object DraftDiscarded : AudioRecordEvent
+    data object SaveFailed : AudioRecordEvent
 }
 
 class AudioRecordViewModel(application: Application) : AndroidViewModel(application) {
@@ -54,6 +58,7 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
     private val transcriptionService = (application as PMeetingApplication).container.transcriptionService
     private val recorder = AudioRecorder(application)
     private val app = application
+    private val appScope = (application as PMeetingApplication).applicationScope
     private val audioManager =
         application.getSystemService(Application.AUDIO_SERVICE) as AudioManager
 
@@ -113,6 +118,7 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
         clock.start()
         recorder.start(repository.mediaDir(MediaType.AUDIO)).fold(
             onSuccess = {
+                lastStoppedFile = null
                 requestAudioFocus()
                 _uiState.update { it.copy(status = RecorderStatus.RECORDING, elapsedMs = 0L) }
                 startTicker()
@@ -150,12 +156,15 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
     /** User pressed stop: finalize file and show the save dialog. */
     fun stopAndShowSave() {
         if (_uiState.value.status == RecorderStatus.IDLE) return
+        if (_uiState.value.draft != null || _uiState.value.saving) return
         stopAsDraft()
     }
 
     fun discardDraft() {
         val draft = _uiState.value.draft ?: return
-        viewModelScope.launch {
+        if (_uiState.value.saving) return
+        // Application scope so the delete is not cancelled by navigation.
+        appScope.launch {
             repository.deleteInternalFile(draft.fileUri)
             _uiState.update { it.copy(draft = null, elapsedMs = 0L) }
             clock.reset()
@@ -165,34 +174,86 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
 
     fun saveDraft(title: String) {
         val draft = _uiState.value.draft ?: return
-        viewModelScope.launch {
-            runCatching {
-                repository.save(
-                    Recording(
-                        id = 0L,
-                        title = title,
-                        createdAt = System.currentTimeMillis(),
-                        durationMs = draft.durationMs,
-                        mediaType = MediaType.AUDIO,
-                        source = RecordingSource.RECORDED,
-                        storageKind = StorageKind.INTERNAL_FILE,
-                        fileUri = draft.fileUri,
-                        mimeType = "audio/mp4",
-                        sizeBytes = 0L
-                    )
-                )
-            }.onSuccess { id ->
-                repository.updateSize(id)
-                _uiState.update { it.copy(draft = null) }
-                // Automatic background transcription: the file is finalized
-                // and saved at this point, never while recording.
-                AutoTranscription.enqueue(app, repository, id)
-                _events.tryEmit(AudioRecordEvent.RecordingSaved)
-            }.onFailure { t ->
+        if (_uiState.value.saving) return
+        _uiState.update { it.copy(saving = true, error = null) }
+        // Application scope: navigation can clear this ViewModel before the
+        // Room insert completes, which previously lost the take.
+        appScope.launch {
+            val id = runCatching { repository.save(draft.toRecording(title)) }.getOrNull()
+            if (id == null) {
                 _uiState.update {
-                    it.copy(error = "Could not save recording: ${t.message ?: "unknown error"}")
+                    it.copy(
+                        saving = false,
+                        error = "Could not save recording. The file was kept; try again."
+                    )
                 }
+                _events.tryEmit(AudioRecordEvent.SaveFailed)
+                return@launch
             }
+            repository.updateSize(id)
+            _uiState.update { it.copy(draft = null, saving = false) }
+            // Automatic background transcription: the file is finalized
+            // and saved at this point, never while recording.
+            AutoTranscription.enqueue(app, repository, id)
+            _events.tryEmit(AudioRecordEvent.RecordingSaved)
+        }
+    }
+
+    /**
+     * Back navigation while recording/paused: stop, finalize and persist with
+     * a default title, then report success so the screen can leave. The save
+     * runs on the application scope so it survives ViewModel teardown.
+     */
+    fun stopAndSaveAndExit() {
+        val state = _uiState.value
+        if (state.saving) return
+        if (state.status == RecorderStatus.IDLE) {
+            // A draft means the user already stopped and is being asked for a
+            // title; the dialog owns the exit decision (save or discard).
+            if (state.draft == null) _events.tryEmit(AudioRecordEvent.RecordingSaved)
+            return
+        }
+        if (!stopRecordingInternal()) return
+        val elapsed = clock.elapsedMs()
+        val file = lastStoppedFile
+        clock.reset()
+        if (file == null) {
+            _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L) }
+            _events.tryEmit(AudioRecordEvent.SaveFailed)
+            return
+        }
+        _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L, saving = true) }
+        appScope.launch {
+            val id = runCatching {
+                repository.save(
+                    AudioRecordUiState.Draft(
+                        fileUri = file.absolutePath,
+                        durationMs = elapsed,
+                        suggestedTitle = ""
+                    ).toRecording(defaultTitle())
+                )
+            }.getOrNull()
+            if (id == null) {
+                // Keep the take as a draft so the user can retry the save or
+                // discard it explicitly; never delete the file on failure.
+                _uiState.update {
+                    it.copy(
+                        saving = false,
+                        draft = AudioRecordUiState.Draft(
+                            fileUri = file.absolutePath,
+                            durationMs = elapsed,
+                            suggestedTitle = defaultTitle()
+                        ),
+                        error = "Could not save recording. The file was kept; try again."
+                    )
+                }
+                _events.tryEmit(AudioRecordEvent.SaveFailed)
+                return@launch
+            }
+            repository.updateSize(id)
+            _uiState.update { it.copy(saving = false) }
+            AutoTranscription.enqueue(app, repository, id)
+            _events.tryEmit(AudioRecordEvent.RecordingSaved)
         }
     }
 
@@ -204,68 +265,107 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
     fun finishAndAutoSave() {
         val state = _uiState.value
         val draft = state.draft
-        if (draft != null) return // dialog already shown; nothing active
+        if (draft != null) {
+            // A take already stopped and waiting for a title: persist it with
+            // its suggested title rather than leaving an orphan file.
+            if (state.saving) return
+            _uiState.update { it.copy(saving = true) }
+            appScope.launch {
+                val id = runCatching { repository.save(draft.toRecording(draft.suggestedTitle)) }
+                    .getOrNull()
+                if (id == null) {
+                    _uiState.update {
+                        it.copy(
+                            saving = false,
+                            error = "Could not save recording. The file was kept; try again."
+                        )
+                    }
+                    _events.tryEmit(AudioRecordEvent.SaveFailed)
+                    return@launch
+                }
+                repository.updateSize(id)
+                _uiState.update { it.copy(draft = null, saving = false, elapsedMs = 0L) }
+                clock.reset()
+                AutoTranscription.enqueue(app, repository, id)
+            }
+            return
+        }
         if (state.status == RecorderStatus.IDLE) return
 
-        stopTicker()
-        abandonAudioFocus()
-        pausedByInterruption = false
+        if (!stopRecordingInternal()) return
         val elapsed = clock.elapsedMs()
+        val file = lastStoppedFile
         clock.reset()
-        recorder.stop().fold(
-            onSuccess = { file ->
-                _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L, draft = null) }
-                viewModelScope.launch {
-                    runCatching {
-                        repository.save(
-                            Recording(
-                                id = 0L,
-                                title = "Meeting ${Formats.formatDate(System.currentTimeMillis())}",
-                                createdAt = System.currentTimeMillis(),
-                                durationMs = elapsed,
-                                mediaType = MediaType.AUDIO,
-                                source = RecordingSource.RECORDED,
-                                storageKind = StorageKind.INTERNAL_FILE,
-                                fileUri = file.absolutePath,
-                                mimeType = "audio/mp4",
-                                sizeBytes = 0L
-                            )
-                        )
-                    }.onSuccess { id ->
-                        repository.updateSize(id)
-                        AutoTranscription.enqueue(app, repository, id)
-                    }
+        if (file == null) {
+            _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L) }
+            return
+        }
+        _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L, saving = true) }
+        appScope.launch {
+            val id = runCatching {
+                repository.save(
+                    AudioRecordUiState.Draft(
+                        fileUri = file.absolutePath,
+                        durationMs = elapsed,
+                        suggestedTitle = ""
+                    ).toRecording(defaultTitle())
+                )
+            }.getOrNull()
+            if (id == null) {
+                // Keep the file and surface the failure; never delete it here.
+                _uiState.update {
+                    it.copy(
+                        saving = false,
+                        error = "Could not save recording. The file was kept; try again."
+                    )
                 }
-            },
-            onFailure = {
-                _uiState.update { it.copy(status = RecorderStatus.IDLE, elapsedMs = 0L, draft = null) }
+                _events.tryEmit(AudioRecordEvent.SaveFailed)
+                return@launch
             }
-        )
+            repository.updateSize(id)
+            _uiState.update { it.copy(saving = false) }
+            AutoTranscription.enqueue(app, repository, id)
+        }
     }
 
     // ----------------------------------------------------------- internals
 
-    private fun stopAsDraft() {
-        if (_uiState.value.status == RecorderStatus.IDLE) return
+    private var lastStoppedFile: java.io.File? = null
+
+    /** Stops the recorder once; returns false if there was nothing to stop. */
+    private fun stopRecordingInternal(): Boolean {
+        val current = _uiState.value
+        if (current.status == RecorderStatus.IDLE) return false
         stopTicker()
         abandonAudioFocus()
         pausedByInterruption = false
-        val elapsed = clock.elapsedMs()
-        clock.reset()
-        recorder.stop().fold(
+        return recorder.stop().fold(
             onSuccess = { file ->
-                _uiState.update {
-                    it.copy(
-                        status = RecorderStatus.IDLE,
-                        draft = AudioRecordUiState.Draft(
-                            fileUri = file.absolutePath,
-                            durationMs = elapsed,
-                            suggestedTitle = "Meeting ${Formats.formatDate(System.currentTimeMillis())}"
-                        )
+                if (RecordingFinalizer.isUsableTake(
+                        fileExists = file.exists(),
+                        lengthBytes = file.length(),
+                        errorMessage = null
                     )
+                ) {
+                    lastStoppedFile = file
+                    true
+                } else {
+                    // Defensive: the recorder normally rejects empty files, but
+                    // never let a zero-length take become a saveable draft.
+                    runCatching { file.delete() }
+                    lastStoppedFile = null
+                    _uiState.update {
+                        it.copy(
+                            status = RecorderStatus.IDLE,
+                            elapsedMs = 0L,
+                            error = "Recording failed: the audio file was empty."
+                        )
+                    }
+                    false
                 }
             },
             onFailure = { t ->
+                lastStoppedFile = null
                 _uiState.update {
                     it.copy(
                         status = RecorderStatus.IDLE,
@@ -273,9 +373,45 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
                         error = "Recording failed: ${t.message ?: "unknown error"}"
                     )
                 }
+                false
             }
         )
     }
+
+    private fun stopAsDraft() {
+        if (_uiState.value.status == RecorderStatus.IDLE) return
+        val elapsed = clock.elapsedMs()
+        if (!stopRecordingInternal()) return
+        val file = lastStoppedFile
+        clock.reset()
+        if (file == null) return
+        _uiState.update {
+            it.copy(
+                status = RecorderStatus.IDLE,
+                draft = AudioRecordUiState.Draft(
+                    fileUri = file.absolutePath,
+                    durationMs = elapsed,
+                    suggestedTitle = defaultTitle()
+                )
+            )
+        }
+    }
+
+    private fun defaultTitle() = "Meeting ${Formats.formatDate(System.currentTimeMillis())}"
+
+    private fun AudioRecordUiState.Draft.toRecording(title: String) =
+        Recording(
+            id = 0L,
+            title = title,
+            createdAt = System.currentTimeMillis(),
+            durationMs = durationMs,
+            mediaType = MediaType.AUDIO,
+            source = RecordingSource.RECORDED,
+            storageKind = StorageKind.INTERNAL_FILE,
+            fileUri = fileUri,
+            mimeType = "audio/mp4",
+            sizeBytes = 0L
+        )
 
     private fun startTicker() {
         tickerJob = viewModelScope.launch {
