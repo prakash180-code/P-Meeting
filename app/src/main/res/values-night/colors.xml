@@ -2,5 +2,5 @@
 <resources>
     <!-- Matches the Compose dark surface so the cold-start window does not
          flash a light background before the first frame is drawn. -->
-    <color name="window_background">#FF101018</color>
+    <color name="window_background">#FF101418</color>
 </resources>
