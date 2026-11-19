@@ -19,11 +19,15 @@ or telemetry code anywhere in the project.
   and stop; live duration display; runtime microphone permission flow;
   audio-focus handling so phone calls and other audio pause the take; files
   are saved in the app's private external storage and a title is requested
-  before the recording is added to the library.
+  before the recording is added to the library. A recording keeps running
+  when the screen is locked or the app is in the background: a microphone
+  foreground service and a partial wake lock keep the session valid, so long
+  meetings are not cut off by the display timeout.
 - **Video recording** — CameraX with front/rear switching, audio included
   when the microphone permission is granted, recording pause/resume, rotation
-  handled without interrupting the take, and safe stop when the app is
-  backgrounded (the take is kept with a default title, rename later).
+  handled without interrupting the take, and the screen kept awake for the
+  whole take so the camera is not released by the lifecycle. Stopping and
+  leaving keeps the take with a default title (rename later).
 - **Import** — Storage Access Framework picker for audio/video files (MP3,
   WAV, M4A, AAC, MP4, 3GP, WebM where a decoder exists). The original file is
   preserved: by default only a read-only link is stored (with a persisted
@@ -36,8 +40,9 @@ or telemetry code anywhere in the project.
   keep all data. Every row also shows a persisted transcription-status icon
   (queued, processing, waiting for model, completed, failed) immediately left
   of the overflow menu.
-- **Privacy** — each recording attempt shows a consent reminder. Recording
-  people without consent is illegal in many places — the app never claims
+- **Privacy** — recording starts immediately; there is no blocking consent
+  dialog. Recording people without consent is illegal in many places, so let
+  everyone know and obtain the consent they require — the app never claims
   otherwise.
 
 ### On-device meeting intelligence (Phase 2)
@@ -91,6 +96,27 @@ or telemetry code anywhere in the project.
   waiting-for-model states keep the previous successful content. Transcript
   and segment writes are transactional.
 
+### Visual design
+
+- **App wallpapers** — two 1440 × 2560 portraits share one visual language
+  (flowing audio ribbons, a sparse collaboration mesh, implied microphone
+  capsules, micro-texture) while keeping the top and bottom thirds dark or
+  quiet so app bars and navigation always read:
+  - night artwork — deep navy, teal, cyan and violet, used by the dark theme;
+  - day artwork — soft blue-white with the same geometry, used by the light
+    theme.
+  Both ship as WebP in `res/drawable-nodpi` (55 KB / 48 KB) and are drawn by
+  `ui/theme/AppBackground.kt` behind the whole app, with a gentle vertical
+  scrim for contrast. Screens use a transparent `Scaffold`; app bars, cards
+  and dialogs keep their opaque surfaces, so lists and text remain fully
+  legible over the artwork. The light/dark choice follows the theme setting in
+  *Settings*.
+- **Reproducible artwork** — `design/generate_background.py` regenerates both
+  variants deterministically (fixed seed, Pillow), and
+  `design/prepare_supplied.py` prepares the source artwork. Exported PNG/JPG/
+  WebP files live in `design/` for previews and store use; only the WebP
+  resources are bundled in the APK.
+
 ## Tech
 
 - Kotlin, Jetpack Compose, Material 3
@@ -117,8 +143,9 @@ com.prakash.pmeeting
 ├─ actionitem    action-item service
 ├─ permissions   runtime permission helpers
 ├─ ui            Compose screens (home / audio / video / detail / transcript /
-│                minutes / action items / email draft / settings), theme,
-│                shared dialogs/components, navigation
+│                minutes / action items / email draft / settings), theme
+│                (including the app wallpaper), shared dialogs/components,
+│                navigation
 └─ util          formatting helpers
 ```
 
@@ -184,19 +211,30 @@ silently wiping the user's library.
 
 - `RECORD_AUDIO` — requested on the audio/video record screens.
 - `CAMERA` — requested on the video screen.
-- `POST_NOTIFICATIONS` (Android 13+) — optional; lets the foreground
-  transcription notification be shown. Denial does not block transcription.
+- `POST_NOTIFICATIONS` (Android 13+) — optional; lets the recording and
+  foreground transcription notifications be shown. Denial does not block
+  recording or transcription.
+- `WAKE_LOCK` — held only while a take runs, so the CPU is not suspended with
+  the screen off.
 
 All are declared in the manifest and requested at runtime only. No storage
 permission is used (app-private storage + SAF). `INTERNET` is also declared,
 solely for the optional model download; recording, playback and transcription
-never use the network. `FOREGROUND_SERVICE` and
-`FOREGROUND_SERVICE_DATA_SYNC` are used by the transcription worker.
+never use the network. `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`
+and `FOREGROUND_SERVICE_CAMERA` keep an active take legitimate in the
+background; `FOREGROUND_SERVICE_DATA_SYNC` is used by the transcription
+worker.
 
 ## Known limitations
 
-- Recording happens while the app is foregrounded; backgrounding stops and
-  keeps the take instead of running a foreground service.
+- Audio recording continues with the screen locked and while the app is
+  backgrounded, as long as the process survives (Android may still reclaim it
+  under extreme memory pressure; the take is then finalized and saved with a
+  default title). Custom ROMs/OEM power savers can kill foreground services
+  unless P-Meeting is excluded from battery optimisation.
+- Video capture needs an active camera session: the screen is kept awake
+  during a take. Pressing the power button releases the camera on most
+  devices, which finalizes the take instead of continuing it.
 - Codec coverage for imported files depends on the device's decoders.
 - Import links can break if the user moves/deletes the source file; the app
   shows a playback error for those entries.

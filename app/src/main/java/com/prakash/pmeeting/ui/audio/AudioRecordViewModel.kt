@@ -15,6 +15,7 @@ import com.prakash.pmeeting.data.model.StorageKind
 import com.prakash.pmeeting.recording.AudioRecorder
 import com.prakash.pmeeting.recording.RecorderStatus
 import com.prakash.pmeeting.recording.RecordingFinalizer
+import com.prakash.pmeeting.recording.RecordingForegroundService
 import com.prakash.pmeeting.transcription.AutoTranscription
 import com.prakash.pmeeting.util.Formats
 import kotlinx.coroutines.Job
@@ -120,6 +121,10 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
             onSuccess = {
                 lastStoppedFile = null
                 requestAudioFocus()
+                // Keeps the microphone session valid and the CPU awake while
+                // the screen is locked, so a meeting is not cut off by the
+                // display timeout.
+                RecordingForegroundService.start(app, video = false)
                 _uiState.update { it.copy(status = RecorderStatus.RECORDING, elapsedMs = 0L) }
                 startTicker()
             },
@@ -328,6 +333,16 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    /**
+     * Safety net for teardown that skips [onDispose] (for example the task being
+     * removed while a take runs): never leave an unfinalized file behind.
+     */
+    override fun onCleared() {
+        if (_uiState.value.status != RecorderStatus.IDLE) finishAndAutoSave()
+        RecordingForegroundService.stop(app)
+        super.onCleared()
+    }
+
     // ----------------------------------------------------------- internals
 
     private var lastStoppedFile: java.io.File? = null
@@ -339,6 +354,7 @@ class AudioRecordViewModel(application: Application) : AndroidViewModel(applicat
         stopTicker()
         abandonAudioFocus()
         pausedByInterruption = false
+        RecordingForegroundService.stop(app)
         return recorder.stop().fold(
             onSuccess = { file ->
                 if (RecordingFinalizer.isUsableTake(

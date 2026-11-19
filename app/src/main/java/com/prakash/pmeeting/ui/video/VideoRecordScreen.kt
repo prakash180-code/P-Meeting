@@ -54,9 +54,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.prakash.pmeeting.data.model.MediaType
 import com.prakash.pmeeting.permissions.Permissions
 import com.prakash.pmeeting.recording.RecorderStatus
+import com.prakash.pmeeting.recording.RecordingForegroundService
 import com.prakash.pmeeting.recording.VideoEvent
 import com.prakash.pmeeting.recording.VideoRecorder
-import com.prakash.pmeeting.ui.components.ConsentDialog
 import com.prakash.pmeeting.ui.components.TitleEditorDialog
 import com.prakash.pmeeting.ui.theme.RecordingRed
 import com.prakash.pmeeting.util.Formats
@@ -71,7 +71,6 @@ fun VideoRecordScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    var consentAccepted by rememberSaveable { mutableStateOf(false) }
     var cameraGranted by rememberSaveable { mutableStateOf(Permissions.cameraGranted(context)) }
     var micGranted by rememberSaveable { mutableStateOf(Permissions.audioGranted(context)) }
 
@@ -84,20 +83,6 @@ fun VideoRecordScreen(
     ) { grants ->
         cameraGranted = grants[Permissions.CAMERA] == true
         micGranted = grants[Permissions.RECORD_AUDIO] == true
-    }
-
-    if (!consentAccepted) {
-        ConsentDialog(
-            onContinue = {
-                consentAccepted = true
-                val missing = mutableListOf<String>()
-                if (!cameraGranted) missing.add(Permissions.CAMERA)
-                if (!micGranted) missing.add(Permissions.RECORD_AUDIO)
-                if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
-            },
-            onDismiss = onDone
-        )
-        return
     }
 
     val previewView = remember { PreviewView(context) }
@@ -165,8 +150,10 @@ fun VideoRecordScreen(
                     micGranted = Permissions.audioGranted(context)
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    viewModel.markAutoSavePending()
-                    recorder.stopRecording()
+                    // ON_STOP also fires when the screen is locked. Stopping the
+                    // take here cut video off at the display timeout, so the
+                    // session is kept alive by the recording foreground service
+                    // instead and only ends when the user stops it.
                 }
                 else -> Unit
             }
@@ -180,6 +167,15 @@ fun VideoRecordScreen(
             viewModel.markAutoSavePending()
             recorder.close()
         }
+    }
+
+    // Camera capture needs an active display on most devices, so keep the
+    // screen on for the whole take. Combined with the front camera/screen-off
+    // restrictions, this is what makes long video recordings reliable.
+    val keepAwake = uiState.status != RecorderStatus.IDLE
+    DisposableEffect(keepAwake) {
+        previewView.keepScreenOn = keepAwake
+        onDispose { previewView.keepScreenOn = false }
     }
 
     LaunchedEffect(Unit) {
@@ -201,6 +197,8 @@ fun VideoRecordScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
                 title = { Text("Record video") },
@@ -296,6 +294,10 @@ fun VideoRecordScreen(
                         FilledIconButton(
                             onClick = {
                                 if (uiState.status == RecorderStatus.IDLE) {
+                                    // Start the foreground session from the
+                                    // tap (the app is guaranteed foreground
+                                    // here), then the camera take.
+                                    RecordingForegroundService.start(context, video = true)
                                     recorder.startRecording(
                                         directory = viewModel.mediaDir(),
                                         withAudio = micGranted,

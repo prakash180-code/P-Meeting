@@ -213,6 +213,8 @@ fun DetailScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
@@ -918,7 +920,7 @@ private fun AudioArtwork(recording: Recording) {
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(4f / 3f)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.18f)),
         contentAlignment = Alignment.Center
     ) {
         RecordingTypeIcon(

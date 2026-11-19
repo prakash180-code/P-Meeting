@@ -13,6 +13,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Recording keeps running with the screen off, which requires a
+         microphone/camera foreground service plus a partial wake lock. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature
         android:name="android.hardware.camera"
@@ -42,6 +47,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Keeps an active take alive while the screen is locked or the app is
+             in the background. -->
+        <service
+            android:name=".recording.RecordingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera"
+            android:stopWithTask="false" />
 
         <!-- Android 14+ requires an explicit foreground-service type. WorkManager's
              service is merged with this declaration. -->

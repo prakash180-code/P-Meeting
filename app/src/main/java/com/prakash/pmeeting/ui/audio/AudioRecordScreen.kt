@@ -38,6 +38,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -49,7 +50,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.prakash.pmeeting.permissions.Permissions
 import com.prakash.pmeeting.recording.RecorderStatus
-import com.prakash.pmeeting.ui.components.ConsentDialog
 import com.prakash.pmeeting.ui.components.TitleEditorDialog
 import com.prakash.pmeeting.ui.theme.PausedAmber
 import com.prakash.pmeeting.ui.theme.RecordingRed
@@ -65,7 +65,6 @@ fun AudioRecordScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    val consentAccepted = rememberSaveable { mutableStateOf(false) }
     var micGranted by rememberSaveable { mutableStateOf(Permissions.audioGranted(context)) }
 
     LaunchedEffect(micGranted) { viewModel.onMicPermissionResult(micGranted) }
@@ -77,19 +76,10 @@ fun AudioRecordScreen(
         viewModel.onMicPermissionResult(granted)
     }
 
-    // Consent reminder before the first take, matching the video screen.
-    if (!consentAccepted.value) {
-        ConsentDialog(
-            onContinue = { consentAccepted.value = true },
-            onDismiss = onDone
-        )
-        return
-    }
-
-    // Leaving the screen or backgrounding the app mid-recording keeps the
-    // take: it is stopped and saved with a default title. Previously the
-    // microphone kept recording in the background, which contradicted the
-    // documented behaviour and could never be stopped from the UI.
+    // Leaving the screen mid-recording keeps the take: it is stopped and saved
+    // with a default title. Locking the device does NOT leave the screen, so a
+    // take keeps running behind the lock screen (the foreground service keeps
+    // the microphone session valid).
     //
     // Back is routed through the same stop-and-save flow instead of calling
     // onDone() immediately: navigation can clear this screen-scoped ViewModel
@@ -111,13 +101,17 @@ fun AudioRecordScreen(
                     // the dialog is dismissed as the activity resumes.
                     micGranted = Permissions.audioGranted(context)
                 }
-                Lifecycle.Event.ON_STOP -> viewModel.finishAndAutoSave()
+                // ON_STOP is intentionally ignored: it fires when the screen is
+                // locked, and stopping there cut recordings off at the display
+                // timeout (often five minutes) instead of letting them run.
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            // The screen/ViewModel is really going away (not just backgrounded):
+            // persist the take so nothing recorded is lost.
             viewModel.finishAndAutoSave()
         }
     }
@@ -133,6 +127,8 @@ fun AudioRecordScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
                 title = { Text("Record audio") },

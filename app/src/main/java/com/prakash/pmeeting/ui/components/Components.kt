@@ -40,28 +40,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 
 /**
- * Consent reminder shown before any recording starts. Recording people
- * without consent is illegal in many places; the app never claims otherwise.
- */
-@Composable
-fun ConsentDialog(onContinue: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Recording reminder") },
-        text = {
-            Text(
-                "Always let everyone know that the meeting is being recorded " +
-                    "and make sure they agree. Recording is not permitted in every " +
-                    "country or situation — you are responsible for obtaining any " +
-                    "consent required. Recordings stay on this device only."
-            )
-        },
-        confirmButton = { TextButton(onClick = onContinue) { Text("Continue") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
-}
-
-/**
  * Title entry dialog shared by: save-after-record (audio/video), rename and
  * import. [extraContent] adds controls below the field (for import options).
  */

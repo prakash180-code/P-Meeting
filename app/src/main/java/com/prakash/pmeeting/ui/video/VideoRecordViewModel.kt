@@ -11,6 +11,7 @@ import com.prakash.pmeeting.data.model.StorageKind
 import com.prakash.pmeeting.recording.FinalizedVideo
 import com.prakash.pmeeting.recording.RecorderStatus
 import com.prakash.pmeeting.recording.RecordingFinalizer
+import com.prakash.pmeeting.recording.RecordingForegroundService
 import com.prakash.pmeeting.recording.VideoEvent
 import com.prakash.pmeeting.transcription.AutoTranscription
 import com.prakash.pmeeting.util.Formats
@@ -194,6 +195,7 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun handleFinalized(result: FinalizedVideo) {
+        RecordingForegroundService.stop(app)
         val autoSave = autoSaveOnFinalize
         autoSaveOnFinalize = false
         val file = result.file
@@ -269,6 +271,15 @@ class VideoRecordViewModel(application: Application) : AndroidViewModel(applicat
             mimeType = mimeType,
             sizeBytes = 0L
         )
+
+    /**
+     * Safety net: the screen's dispose already stops and auto-saves an active
+     * take, but the foreground session must never outlive the ViewModel.
+     */
+    override fun onCleared() {
+        RecordingForegroundService.stop(app)
+        super.onCleared()
+    }
 
     private fun startTicker() {
         tickerJob = viewModelScope.launch {

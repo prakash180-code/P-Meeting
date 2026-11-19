@@ -7,10 +7,14 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.prakash.pmeeting.ui.PMeetingApp
+import com.prakash.pmeeting.ui.theme.AppBackground
 import com.prakash.pmeeting.ui.theme.PMeetingTheme
 
 class MainActivity : ComponentActivity() {
@@ -34,7 +38,10 @@ class MainActivity : ComponentActivity() {
                 )
             }
             PMeetingTheme(darkTheme = darkTheme) {
-                PMeetingApp()
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AppBackground(dark = darkTheme)
+                    PMeetingApp()
+                }
             }
         }
     }
